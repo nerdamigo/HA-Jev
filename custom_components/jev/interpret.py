@@ -817,8 +817,27 @@ def interpret(
         and target.choice == "entity"
         and target.confidence >= min_confidence
     )
+    # And a command for a room is not a command for the one device in it the model
+    # also liked. Reported: "turn off the lights in the living room" scored the room
+    # at 1.00, the target as a room at 0.93, and its one ceiling light at 0.78, which
+    # took the device path and acted on that light alone, or on nothing.
+    one_room = (
+        target is not None
+        and target.choice == "area"
+        and target.confidence >= min_confidence
+        and (
+            named_area is not None
+            or (
+                floor is not None
+                and floor.choice != NONE
+                and floor.confidence >= min_confidence
+            )
+        )
+    )
+    asks = action.choice in _QUESTIONS
     if (
-        entity is not None
+        not one_room
+        and entity is not None
         and entity.choice != NONE
         and entity.confidence >= min_confidence
     ):
@@ -829,7 +848,7 @@ def interpret(
         # not one of them. Measured on a development instance with an unexposed
         # "Desk lamp" and an exposed "Lamp": "turn on the desk lamp" came back as
         # Lamp and switched it on, three times of three.
-        if _a_hidden_name_fits_better(text, described, snapshot):
+        if _a_hidden_name_fits_better(text, described, snapshot, asks=asks):
             return out("named a device that is not exposed")
         if ask_back:
             picked = pick(described, sure=True)
@@ -877,7 +896,7 @@ def interpret(
     ):
         # "Turn on the desk lamp" with a hidden desk lamp would otherwise ask
         # which of two exposed lamps was meant.
-        if _a_hidden_name_fits_better(text, unsure, snapshot):
+        if _a_hidden_name_fits_better(text, unsure, snapshot, asks=asks):
             return out("named a device that is not exposed")
         picked = pick(unsure, sure=False)
         if isinstance(picked, Interpretation):
@@ -1088,11 +1107,16 @@ def spoken_name(one: ExposedEntity, other: ExposedEntity) -> tuple[str, str] | N
 
 
 def _a_hidden_name_fits_better(
-    text: str, chosen: ExposedEntity, snapshot: HomeSnapshot
+    text: str, chosen: ExposedEntity, snapshot: HomeSnapshot, *, asks: bool
 ) -> bool:
-    """A hidden name that the command says in more words than the chosen one."""
+    """A hidden name that the command says in more words than the chosen one.
+
+    A command is about a device, so only a hidden device's name counts against it.
+    A question can be about anything, so every hidden name does.
+    """
     said = max(_words_said(text, name) for name in chosen.names)
-    return any(_words_said(text, name) > said for name in snapshot.hidden_names)
+    hidden = snapshot.hidden_names if asks else snapshot.hidden_device_names
+    return any(_words_said(text, name) > said for name in hidden)
 
 
 def _words_said(text: str, name: str) -> int:
@@ -1100,12 +1124,16 @@ def _words_said(text: str, name: str) -> int:
 
     Whole words only, so a hidden "Lamp" is not found inside "lamps". In a language
     written without spaces a name rarely stands apart, so the check seldom fires.
+
+    A name followed by a possessive says whose, not which: "Alex's office" does not
+    say the name "Alex".
     """
     words = name.casefold().split()
     if not words:
         return 0
     phrase = r"\s+".join(re.escape(w) for w in words)
-    return len(words) if re.search(rf"(?<!\w){phrase}(?!\w)", text.casefold()) else 0
+    found = re.search(rf"(?<!\w){phrase}(?!\w|['\u2019]s\b)", text.casefold())
+    return len(words) if found else 0
 
 
 # The actions that only ask, and change nothing.

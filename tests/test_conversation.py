@@ -3005,3 +3005,146 @@ async def test_a_split_between_a_question_and_a_command_goes_out(
 
     trace = warm_house.runtime_data.conversation_traces[0]
     assert trace["reason"] == "action confidence 0.47 below 0.60"
+
+
+def room_command(action="turn_off", device_confidence=0.78):
+    """The reported shape: a sure room, and its one ceiling light liked as well."""
+    return answer_set(
+        action=ChoiceAnswer(choice=action, probabilities={}, confidence=1.0),
+        target_type=ChoiceAnswer(choice="area", probabilities={}, confidence=0.93),
+        entity=ChoiceAnswer(
+            choice="light.office", probabilities={}, confidence=device_confidence
+        ),
+        area=ChoiceAnswer(choice="Office", probabilities={}, confidence=1.0),
+        domain=ChoiceAnswer(choice="light", probabilities={}, confidence=1.0),
+    )
+
+
+async def test_a_sure_room_beats_a_device_the_model_also_liked(hass, house, mock_client):
+    """Reported: the room at 1.00 and its light at 0.78 acted on that light alone."""
+    entry = er.async_get(hass).async_get_or_create(
+        "light", "demo", "desk", suggested_object_id="desk"
+    )
+    office = ar.async_get(hass).async_get_area_by_name("Office")
+    assert office is not None
+    er.async_get(hass).async_update_entity(
+        entry.entity_id, name="Desk lamp", area_id=office.id
+    )
+    hass.states.async_set("light.desk", "on", {"friendly_name": "Desk lamp"})
+    async_expose_entity(hass, conversation.DOMAIN, "light.desk", True)
+    mock_client.ask.return_value = build_response(**room_command())
+    calls = []
+    hass.services.async_register("light", "turn_off", lambda call: calls.append(call))
+
+    await converse(hass, "turn off the lights in the office")
+    await hass.async_block_till_done()
+
+    assert sorted(e for c in calls for e in c.data["entity_id"]) == [
+        "light.desk",
+        "light.office",
+    ]
+
+
+async def test_a_hidden_name_in_a_room_command_does_not_stop_it(hass, house, mock_client):
+    """Reported: a hidden name said in the room's name sent the command to nobody."""
+    hass.states.async_set("media_player.office", "off", {"friendly_name": "Office"})
+    async_expose_entity(hass, conversation.DOMAIN, "media_player.office", False)
+    mock_client.ask.return_value = build_response(**room_command())
+    calls = []
+    hass.services.async_register("light", "turn_off", lambda call: calls.append(call))
+
+    await converse(hass, "turn off the lights in the office")
+    await hass.async_block_till_done()
+
+    assert [e for c in calls for e in c.data["entity_id"]] == ["light.office"]
+
+
+async def test_a_room_the_model_is_unsure_of_leaves_the_device_answer(
+    hass, house, mock_client
+):
+    """Only a sure room overrides the device. An unsure one is no reason to."""
+    answers = room_command(action="turn_on", device_confidence=1.0)
+    answers["target_type"] = ChoiceAnswer(choice="area", probabilities={}, confidence=0.5)
+    mock_client.ask.return_value = build_response(**answers)
+    calls = []
+    hass.services.async_register("light", "turn_on", lambda call: calls.append(call))
+
+    await converse(hass, "turn on the office light")
+    await hass.async_block_till_done()
+
+    assert [c.data.get("entity_id") for c in calls] == [["light.office"]]
+    assert "area" not in house.runtime_data.conversation_traces[0]["slots"]
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "turn on Alex's office light",
+        "turn on Alex\N{RIGHT SINGLE QUOTATION MARK}s office light",
+    ],
+)
+async def test_whose_room_it_is_does_not_name_a_hidden_person(
+    hass, house, mock_client, text
+):
+    """Reported: a person named as the owner stopped every command for the room."""
+    rename(hass, "light.office", "Alex's office overhead light")
+    hass.states.async_set("person.alex", "home", {"friendly_name": "Alex"})
+    mock_client.ask.return_value = build_response(
+        **answer_set(
+            entity=ChoiceAnswer(choice="light.office", probabilities={}, confidence=1.0)
+        )
+    )
+    calls = []
+    hass.services.async_register("light", "turn_on", lambda call: calls.append(call))
+
+    await converse(hass, text)
+    await hass.async_block_till_done()
+
+    assert [e for c in calls for e in c.data["entity_id"]] == ["light.office"]
+
+
+@pytest.mark.parametrize(
+    ("action", "acts"),
+    [
+        # A sensor is not a device a command could mean.
+        ("turn_on", True),
+        # A question could be about the sensor, so the guard stands.
+        ("get_state", False),
+    ],
+)
+async def test_a_hidden_sensor_stops_a_question_but_not_a_command(
+    hass, house, mock_client, action, acts
+):
+    hass.states.async_set("sensor.desk", "21", {"friendly_name": "Desk"})
+    mock_client.ask.return_value = build_response(
+        **answer_set(
+            action=ChoiceAnswer(choice=action, probabilities={}, confidence=0.97),
+            entity=ChoiceAnswer(choice="light.office", probabilities={}, confidence=1.0),
+        )
+    )
+    calls = []
+    hass.services.async_register("light", "turn_on", lambda call: calls.append(call))
+
+    text = "the light by the desk" if action == "turn_on" else "is the desk on"
+    await converse(hass, f"turn on {text}" if action == "turn_on" else text)
+    await hass.async_block_till_done()
+
+    reason = house.runtime_data.conversation_traces[0]["reason"]
+    assert (reason != "named a device that is not exposed") is acts
+
+
+async def test_whose_room_it_is_does_not_stop_a_question_either(hass, house, mock_client):
+    """A question reads every hidden name, so the possessive has to be read as one."""
+    rename(hass, "light.office", "Alex's office overhead light")
+    hass.states.async_set("person.alex", "home", {"friendly_name": "Alex"})
+    mock_client.ask.return_value = build_response(
+        **answer_set(
+            action=ChoiceAnswer(choice="get_state", probabilities={}, confidence=0.97),
+            entity=ChoiceAnswer(choice="light.office", probabilities={}, confidence=1.0),
+        )
+    )
+
+    result = await converse(hass, "is Alex's office light on")
+
+    assert house.runtime_data.conversation_traces[0]["reason"] == "ok"
+    assert "off" in result.response.speech["plain"]["speech"].casefold()

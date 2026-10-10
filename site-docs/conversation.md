@@ -90,7 +90,9 @@ says "Done."
 | Nothing asked for, such as "I turned off the lamp" or "zet de lamp niet aan" | Fallback. Both acted before: the first turned the lamp off, the second turned it off instead of leaving it |
 | A lock or a garage, gate or door cover | Fallback. The agent never describes one |
 | An entity you did not expose to Assist | Never described to the model at all |
-| A hidden device named in full, next to an exposed one with a shorter name | Fallback. "Turn on the desk lamp" does not turn on "Lamp" |
+| A hidden device named in full, next to an exposed one with a shorter name | Fallback. "Turn on the desk lamp" does not turn on "Lamp". For a command, only a hidden device counts: a person, a sensor or a zone named in the sentence does not stop it. A question still checks every hidden name |
+| A name followed by "'s", such as "Alex's office" | Read as whose, not as the name. A person called Alex does not stop "turn on the lights in Alex's office" |
+| A room the model is sure of, and one device in it it also likes | Acts on the room. "Turn off the lights in the office" turns off every exposed light there, not only the one it liked best |
 | No room and no device named | Refused, unless you allow it. `turn_off` is exempt. Below the confidence floor, fallback |
 | Several devices named by part of their names, such as "turn off the lamps" | Fallback. Home Assistant's intents have no target for some of the lights, and every light is the wrong answer |
 | Two kinds of device, no kind named, whole house | Asks which kind. With one kind exposed, it acts on that kind |

@@ -47,6 +47,26 @@ CONTROLLABLE = (
 # garage" matched at the 0.6 default floor would open it.
 ENTRANCE_COVERS = ("door", "garage", "gate")
 
+# Domains of devices a spoken command could mean, whether or not this agent acts on
+# them. A hidden one named in a command stops the model's nearest exposed pick. A
+# person, a sensor or a zone is not something to turn on, and its name in a command
+# says whose or where. Reported: a person called "Alex" stopped "turn on the lights
+# in Alex's office" and every other command that said whose room it was.
+DEVICE_DOMAINS = (
+    *CONTROLLABLE,
+    "lock",
+    "valve",
+    "humidifier",
+    "water_heater",
+    "siren",
+    "remote",
+    "lawn_mower",
+    "button",
+    "input_button",
+    "automation",
+    "alarm_control_panel",
+)
+
 
 @dataclass(slots=True)
 class ExposedEntity:
@@ -118,6 +138,9 @@ class HomeSnapshot:
     # past the cap. They never leave Home Assistant. interpret() reads them so that
     # "the desk lamp" cannot land on an exposed "Lamp" when the desk lamp is hidden.
     hidden_names: list[str] = field(default_factory=list)
+    # The same, for devices only: see DEVICE_DOMAINS. A command reads these, and a
+    # question reads all of them, since "is the hall motion on" asks about a sensor.
+    hidden_device_names: list[str] = field(default_factory=list)
     # How many exposed entities the cap left out, for the trace.
     left_out: int = 0
 
@@ -224,6 +247,7 @@ def async_snapshot(
 
     found: list[ExposedEntity] = []
     hidden: list[str] = []
+    hidden_devices: list[str] = []
     for state in hass.states.async_all():
         # allow_empty=False gives the name Home Assistant falls back to. That name
         # is "" for an entity with no name of its own, which matches nothing said.
@@ -242,7 +266,10 @@ def async_snapshot(
                 and state.attributes.get("device_class") in ENTRANCE_COVERS
             )
         ):
-            hidden.extend(dict.fromkeys((state.name, *intent_names)))
+            names = dict.fromkeys((state.name, *intent_names))
+            hidden.extend(names)
+            if state.domain in DEVICE_DOMAINS:
+                hidden_devices.extend(names)
             continue
         area_id = area_id_of(state.entity_id)
         area = areas.async_get_area(area_id) if area_id else None
@@ -266,6 +293,7 @@ def async_snapshot(
         found, left_out = ranked[:limit], ranked[limit:]
         found.sort(key=lambda e: e.entity_id)
     hidden.extend(name for e in left_out for name in e.names)
+    hidden_devices.extend(name for e in left_out for name in e.names)
     # Counted after the cap, so a room that only had entities past the limit is not
     # offered as somewhere the command could go.
     used_area_ids = {e.area_id for e in found if e.area_id}
@@ -311,6 +339,7 @@ def async_snapshot(
             a.name for a in used_areas if a and a.id in sensed_area_ids
         ),
         hidden_names=hidden,
+        hidden_device_names=hidden_devices,
         left_out=len(left_out),
     )
 
